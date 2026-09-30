@@ -271,6 +271,15 @@ def elevenlabs_webhook():
     event_type = payload.get("type", "")
 
     if event_type == "post_call_transcription":
+        # TEMPORARY DEBUG: log the raw analysis/data_collection structure so
+        # we can see exactly where ElevenLabs puts Update State values.
+        # Remove this print once field extraction is confirmed working.
+        debug_data = payload.get("data", {})
+        print("DEBUG analysis keys:", list((debug_data.get("analysis") or {}).keys()))
+        print("DEBUG data_collection_results:", json.dumps(
+            (debug_data.get("analysis") or {}).get("data_collection_results"), default=str
+        ))
+        print("DEBUG top-level data keys:", list(debug_data.keys()))
         info = extract_lead_data(payload)
         handle_piece(info["conversation_id"], lead_info=info, audio_bytes=None)
         return jsonify({"status": "received"}), 200
