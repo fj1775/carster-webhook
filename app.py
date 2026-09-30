@@ -5,6 +5,11 @@ Receives ElevenLabs post-call webhooks and emails ONE combined summary
 (lead details + call recording, when available) to the dealership inbox
 per call.
 
+Sends email via the Resend API (HTTPS) instead of raw SMTP, since many
+free hosting platforms (including Render's free tier) block or heavily
+throttle outbound SMTP connections, causing sends to hang and time out.
+Resend has a free tier (100 emails/day) and works over normal HTTPS.
+
 ElevenLabs delivers the transcript and the audio recording as two
 separate webhook events (post_call_transcription and post_call_audio),
 which can arrive in either order. This app holds whichever piece
@@ -13,9 +18,6 @@ combined email once both pieces for that conversation have arrived. If
 only one piece ever arrives (e.g. audio disabled, or the app restarts
 between the two deliveries), a short timeout sends what's available
 rather than waiting forever.
-
-No third-party automation tools (Zapier, Make, etc.) required — this is
-a small, self-hosted Flask app deployed for free on Render.
 """
 
 import os
@@ -23,23 +25,21 @@ import json
 import hmac
 import hashlib
 import base64
-import smtplib
 import threading
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
 
+import requests
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
 # ---- Configuration (set these as environment variables on your host) ----
 ELEVENLABS_WEBHOOK_SECRET = os.environ.get("ELEVENLABS_WEBHOOK_SECRET", "")
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")   # your Gmail address
-SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")   # Gmail App Password (not your normal password)
+
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
+# "From" address must be on a domain you've verified with Resend, OR use
+# Resend's shared test sender "onboarding@resend.dev" (fine for getting
+# started; swap in your own verified domain later for production use).
+RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
 NOTIFY_TO_EMAIL = os.environ.get("NOTIFY_TO_EMAIL", "")  # where lead emails should be sent
 
 # How long to wait for the second piece (transcript or audio) before
@@ -64,14 +64,11 @@ LEAD_FIELDS = [
 ]
 
 # In-memory store: conversation_id -> {"lead_info": ..., "audio_bytes": ..., "timer": ...}
-# Cleared as soon as a combined email is sent. Lost on restart/redeploy —
-# acceptable for a low-volume dealership line; a missed pairing just
-# means one call's two pieces get sent as separate emails instead.
 _pending = {}
 _pending_lock = threading.Lock()
 
 
-def verify_signature(payload_bytes: bytes, signature_header: str) -> bool:
+def verify_signature(payload_bytes, signature_header):
     """Verify the HMAC-SHA256 signature ElevenLabs sends with each webhook."""
     if not ELEVENLABS_WEBHOOK_SECRET:
         return True
@@ -92,7 +89,7 @@ def verify_signature(payload_bytes: bytes, signature_header: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def extract_lead_data(payload: dict) -> dict:
+def extract_lead_data(payload):
     """Pull transcript, summary, and Update State lead fields out of the payload."""
     data = payload.get("data", {})
 
@@ -134,7 +131,8 @@ def extract_lead_data(payload: dict) -> dict:
     }
 
 
-def build_combined_email(conversation_id, lead_info, audio_bytes):
+def build_email_payload(conversation_id, lead_info, audio_bytes):
+    """Build the JSON payload for the Resend API (https://resend.com/docs/api-reference/emails/send-email)."""
     lead = (lead_info or {}).get("lead", {})
 
     lines = [f"New CARSTER call — Conversation ID: {conversation_id}"]
@@ -156,33 +154,45 @@ def build_combined_email(conversation_id, lead_info, audio_bytes):
     if not audio_bytes:
         lines += ["", "(No call recording was received for this call.)"]
 
-    body = "\n".join(lines)
+    body_text = "\n".join(lines)
+    # Resend renders "text" with line breaks preserved when no html is given,
+    # but wrapping in <pre> via html keeps formatting predictable everywhere.
+    body_html = "<pre style='font-family: monospace; white-space: pre-wrap;'>" + \
+        body_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + \
+        "</pre>"
 
-    msg = MIMEMultipart()
     name_part = f"{lead.get('first_name', 'Unknown')} {lead.get('last_name', '')}".strip()
-    msg["Subject"] = f"New CARSTER Lead — {name_part}" if lead_info else f"CARSTER Call — {conversation_id}"
-    msg["From"] = SMTP_USERNAME
-    msg["To"] = NOTIFY_TO_EMAIL
-    msg.attach(MIMEText(body, "plain"))
+    subject = f"New CARSTER Lead — {name_part}" if lead_info else f"CARSTER Call — {conversation_id}"
+
+    payload = {
+        "from": RESEND_FROM_EMAIL,
+        "to": [NOTIFY_TO_EMAIL],
+        "subject": subject,
+        "text": body_text,
+        "html": body_html,
+    }
 
     if audio_bytes:
-        part = MIMEBase("audio", "mpeg")
-        part.set_payload(audio_bytes)
-        encoders.encode_base64(part)
-        part.add_header(
-            "Content-Disposition",
-            f"attachment; filename=carster_call_{conversation_id}.mp3",
-        )
-        msg.attach(part)
+        payload["attachments"] = [{
+            "filename": f"carster_call_{conversation_id}.mp3",
+            "content": base64.b64encode(audio_bytes).decode("ascii"),
+        }]
 
-    return msg
+    return payload
 
 
-def send_email(msg):
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
-        server.login(SMTP_USERNAME, SMTP_PASSWORD)
-        server.sendmail(SMTP_USERNAME, [NOTIFY_TO_EMAIL], msg.as_string())
+def send_email(payload):
+    response = requests.post(
+        "https://api.resend.com/emails",
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=20,
+    )
+    if response.status_code >= 300:
+        raise RuntimeError(f"Resend API error {response.status_code}: {response.text}")
 
 
 def _send_and_clear(conversation_id):
@@ -192,8 +202,8 @@ def _send_and_clear(conversation_id):
     if entry is None:
         return
     try:
-        msg = build_combined_email(conversation_id, entry.get("lead_info"), entry.get("audio_bytes"))
-        send_email(msg)
+        payload = build_email_payload(conversation_id, entry.get("lead_info"), entry.get("audio_bytes"))
+        send_email(payload)
     except Exception as exc:  # noqa: BLE001
         print(f"Failed to send combined email for {conversation_id}: {exc}")
 
@@ -224,8 +234,6 @@ def handle_piece(conversation_id, lead_info, audio_bytes):
                 entry["timer"].cancel()
             should_send_now = True
         else:
-            # First piece for this conversation — start the timeout so we
-            # don't wait forever if the second piece never arrives.
             if entry.get("timer") is None:
                 entry["timer"] = _schedule_timeout(conversation_id)
             should_send_now = False
