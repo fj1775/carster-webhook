@@ -46,23 +46,6 @@ NOTIFY_TO_EMAIL = os.environ.get("NOTIFY_TO_EMAIL", "")  # where lead emails sho
 # sending an email with just whichever piece has arrived.
 PAIRING_TIMEOUT_SECONDS = int(os.environ.get("PAIRING_TIMEOUT_SECONDS", "45"))
 
-# The Update State field names you configured in ElevenLabs.
-LEAD_FIELDS = [
-    "first_name",
-    "last_name",
-    "phone",
-    "email",
-    "vehicle_of_interest",
-    "appointment_request",
-    "buying_motivation",
-    "hot_buttons",
-    "budget",
-    "trade_in",
-    "financing_interest",
-    "purchase_urgency",
-    "customer_concerns",
-]
-
 # In-memory store: conversation_id -> {"lead_info": ..., "audio_bytes": ..., "timer": ...}
 _pending = {}
 _pending_lock = threading.Lock()
@@ -90,7 +73,16 @@ def verify_signature(payload_bytes, signature_header):
 
 
 def extract_lead_data(payload):
-    """Pull transcript, summary, and Update State lead fields out of the payload."""
+    """Pull transcript, summary, and collected lead fields out of the payload.
+
+    ElevenLabs' post-call "Data Collection" analysis (configured under the
+    agent's Analysis tab) returns whatever fields are actually defined there
+    under analysis.data_collection_results, each shaped like:
+        {"<field_id>": {"value": ..., "json_schema": {...}, "rationale": ...}}
+    Rather than assuming fixed field names, we display every field that's
+    actually present, labeled from its id, so this keeps working even if
+    the configured field set changes.
+    """
     data = payload.get("data", {})
 
     conversation_id = data.get("conversation_id", "unknown")
@@ -99,21 +91,15 @@ def extract_lead_data(payload):
     analysis = data.get("analysis", {}) or {}
     summary = analysis.get("transcript_summary") or analysis.get("call_summary") or ""
 
-    collected = {}
-    for key in ("data_collection_results", "collected_data", "dynamic_variables"):
-        block = data.get(key)
-        if isinstance(block, dict):
-            collected.update(block)
-    dcr = analysis.get("data_collection_results")
-    if isinstance(dcr, dict):
-        collected.update(dcr)
+    dcr = analysis.get("data_collection_results") or {}
 
     lead = {}
-    for field in LEAD_FIELDS:
-        value = collected.get(field)
-        if isinstance(value, dict):
-            value = value.get("value")
-        lead[field] = value or "Not provided"
+    if isinstance(dcr, dict):
+        for field_id, entry in dcr.items():
+            value = entry
+            if isinstance(entry, dict):
+                value = entry.get("value")
+            lead[field_id] = value if value not in (None, "") else "Not provided"
 
     transcript_turns = data.get("transcript", []) or []
     transcript_text = "\n".join(
@@ -139,9 +125,12 @@ def build_email_payload(conversation_id, lead_info, audio_bytes):
 
     if lead_info:
         lines += ["", "== Lead Details =="]
-        for field in LEAD_FIELDS:
-            label = field.replace("_", " ").title()
-            lines.append(f"{label}: {lead.get(field, 'Not provided')}")
+        if lead:
+            for field_id, value in lead.items():
+                label = field_id.replace("_", " ").title()
+                lines.append(f"{label}: {value}")
+        else:
+            lines.append("(No data collection fields were configured or returned for this call.)")
 
         if lead_info.get("summary"):
             lines += ["", "== Call Summary ==", lead_info["summary"]]
@@ -161,7 +150,12 @@ def build_email_payload(conversation_id, lead_info, audio_bytes):
         body_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + \
         "</pre>"
 
-    name_part = f"{lead.get('first_name', 'Unknown')} {lead.get('last_name', '')}".strip()
+    # Try a few likely name field ids; fall back to "Unknown" if none present.
+    name_part = "Unknown"
+    for possible_key in ("customer_name", "first_name", "name", "caller_name"):
+        if lead.get(possible_key) and lead[possible_key] != "Not provided":
+            name_part = lead[possible_key]
+            break
     subject = f"New CARSTER Lead — {name_part}" if lead_info else f"CARSTER Call — {conversation_id}"
 
     payload = {
@@ -271,15 +265,6 @@ def elevenlabs_webhook():
     event_type = payload.get("type", "")
 
     if event_type == "post_call_transcription":
-        # TEMPORARY DEBUG: log the raw analysis/data_collection structure so
-        # we can see exactly where ElevenLabs puts Update State values.
-        # Remove this print once field extraction is confirmed working.
-        debug_data = payload.get("data", {})
-        print("DEBUG analysis keys:", list((debug_data.get("analysis") or {}).keys()))
-        print("DEBUG data_collection_results:", json.dumps(
-            (debug_data.get("analysis") or {}).get("data_collection_results"), default=str
-        ))
-        print("DEBUG top-level data keys:", list(debug_data.keys()))
         info = extract_lead_data(payload)
         handle_piece(info["conversation_id"], lead_info=info, audio_bytes=None)
         return jsonify({"status": "received"}), 200
