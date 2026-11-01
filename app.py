@@ -42,6 +42,18 @@ RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 RESEND_FROM_EMAIL = os.environ.get("RESEND_FROM_EMAIL", "onboarding@resend.dev")
 NOTIFY_TO_EMAIL = os.environ.get("NOTIFY_TO_EMAIL", "")  # where lead emails should be sent
 
+# Agents in this ElevenLabs workspace share this webhook. Map agent IDs to the
+# business name used in the email. Anything not listed is labeled CARSTER.
+FOXTROT_AGENT_ID = os.environ.get("FOXTROT_AGENT_ID", "agent_1201m6ac1kw4en5t73rm5bmg7dxs")
+AGENT_BRANDS = {FOXTROT_AGENT_ID: "Foxtrot Motors"}
+DEFAULT_BRAND = "CARSTER"
+
+
+def brand_for(lead_info):
+    agent_id = (lead_info or {}).get("agent_id", "")
+    return AGENT_BRANDS.get(agent_id, DEFAULT_BRAND)
+
+
 # How long to wait for the second piece (transcript or audio) before
 # sending an email with just whichever piece has arrived.
 PAIRING_TIMEOUT_SECONDS = int(os.environ.get("PAIRING_TIMEOUT_SECONDS", "45"))
@@ -120,8 +132,10 @@ def extract_lead_data(payload):
 def build_email_payload(conversation_id, lead_info, audio_bytes):
     """Build the JSON payload for the Resend API (https://resend.com/docs/api-reference/emails/send-email)."""
     lead = (lead_info or {}).get("lead", {})
+    brand = brand_for(lead_info)
+    is_chat_brand = brand != DEFAULT_BRAND
 
-    lines = [f"New CARSTER call — Conversation ID: {conversation_id}"]
+    lines = [f"New {brand} {'conversation' if is_chat_brand else 'call'} — Conversation ID: {conversation_id}"]
 
     if lead_info:
         lines += ["", "== Lead Details =="]
@@ -140,7 +154,7 @@ def build_email_payload(conversation_id, lead_info, audio_bytes):
     else:
         lines += ["", "(Lead details were not received for this call.)"]
 
-    if not audio_bytes:
+    if not audio_bytes and not is_chat_brand:
         lines += ["", "(No call recording was received for this call.)"]
 
     body_text = "\n".join(lines)
@@ -156,7 +170,7 @@ def build_email_payload(conversation_id, lead_info, audio_bytes):
         if lead.get(possible_key) and lead[possible_key] != "Not provided":
             name_part = lead[possible_key]
             break
-    subject = f"New CARSTER Lead — {name_part}" if lead_info else f"CARSTER Call — {conversation_id}"
+    subject = f"New {brand} Lead — {name_part}" if lead_info else f"{brand} Call — {conversation_id}"
 
     payload = {
         "from": RESEND_FROM_EMAIL,
@@ -168,7 +182,7 @@ def build_email_payload(conversation_id, lead_info, audio_bytes):
 
     if audio_bytes:
         payload["attachments"] = [{
-            "filename": f"carster_call_{conversation_id}.mp3",
+            "filename": f"{brand.lower().replace(' ', '_')}_call_{conversation_id}.mp3",
             "content": base64.b64encode(audio_bytes).decode("ascii"),
         }]
 
@@ -287,7 +301,7 @@ def elevenlabs_webhook():
 
 @app.route("/", methods=["GET"])
 def health_check():
-    return "CARSTER webhook receiver is running.", 200
+    return "CARSTER / Foxtrot Motors webhook receiver is running.", 200
 
 
 if __name__ == "__main__":
