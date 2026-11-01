@@ -84,6 +84,30 @@ def verify_signature(payload_bytes, signature_header):
     return hmac.compare_digest(expected, signature)
 
 
+# Newer ElevenLabs data collection items get auto-generated ids (for example
+# "aitem_0901m6...") instead of the name typed in the dashboard. Map them to a
+# readable label using the start of the field's description.
+DESCRIPTION_LABELS = {
+    "when the customer plans to buy": "purchase_timeline",
+    "the payment or out-the-door estimate": "payment_estimate",
+    "whether the customer mentioned military": "military_affiliation",
+}
+
+
+def readable_field_id(field_id, entry):
+    if not str(field_id).lower().startswith("aitem"):
+        return field_id
+    schema = entry.get("json_schema") or {}
+    description = (schema.get("description") or "").strip()
+    lowered = description.lower()
+    for prefix, label in DESCRIPTION_LABELS.items():
+        if lowered.startswith(prefix):
+            return label
+    if description:
+        return description.split(".")[0][:40]
+    return field_id
+
+
 def extract_lead_data(payload):
     """Pull transcript, summary, and collected lead fields out of the payload.
 
@@ -111,6 +135,7 @@ def extract_lead_data(payload):
             value = entry
             if isinstance(entry, dict):
                 value = entry.get("value")
+                field_id = readable_field_id(field_id, entry)
             lead[field_id] = value if value not in (None, "") else "Not provided"
 
     transcript_turns = data.get("transcript", []) or []
