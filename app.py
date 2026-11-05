@@ -45,13 +45,23 @@ NOTIFY_TO_EMAIL = os.environ.get("NOTIFY_TO_EMAIL", "")  # where lead emails sho
 # Agents in this ElevenLabs workspace share this webhook. Map agent IDs to the
 # business name used in the email. Anything not listed is labeled CARSTER.
 FOXTROT_AGENT_ID = os.environ.get("FOXTROT_AGENT_ID", "agent_1201m6ac1kw4en5t73rm5bmg7dxs")
-AGENT_BRANDS = {FOXTROT_AGENT_ID: "Foxtrot Motors"}
+FOXTROT_PHONE_AGENT_ID = os.environ.get("FOXTROT_PHONE_AGENT_ID", "agent_3501m6n6zg34ff1rq75yj7m3a6ah")
+AGENT_BRANDS = {
+    FOXTROT_AGENT_ID: "Foxtrot Motors",
+    FOXTROT_PHONE_AGENT_ID: "Foxtrot Motors",
+}
+# Agents that only chat (no call recording to wait for or mention).
+CHAT_ONLY_AGENTS = {FOXTROT_AGENT_ID}
 DEFAULT_BRAND = "CARSTER"
 
 
 def brand_for(lead_info):
     agent_id = (lead_info or {}).get("agent_id", "")
     return AGENT_BRANDS.get(agent_id, DEFAULT_BRAND)
+
+
+def is_chat_agent(lead_info):
+    return (lead_info or {}).get("agent_id", "") in CHAT_ONLY_AGENTS
 
 
 # How long to wait for the second piece (transcript or audio) before
@@ -158,7 +168,7 @@ def build_email_payload(conversation_id, lead_info, audio_bytes):
     """Build the JSON payload for the Resend API (https://resend.com/docs/api-reference/emails/send-email)."""
     lead = (lead_info or {}).get("lead", {})
     brand = brand_for(lead_info)
-    is_chat_brand = brand != DEFAULT_BRAND
+    is_chat_brand = is_chat_agent(lead_info)
 
     lines = [f"New {brand} {'conversation' if is_chat_brand else 'call'} — Conversation ID: {conversation_id}"]
 
