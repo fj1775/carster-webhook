@@ -342,6 +342,9 @@ def elevenlabs_webhook():
 # ElevenLabs leads above. No database; nothing is stored.
 
 FOXTROT_NOTIFY_TO_EMAIL = os.environ.get("FOXTROT_NOTIFY_TO_EMAIL", "") or NOTIFY_TO_EMAIL
+# Sender for Foxtrot website leads, e.g. "Foxtrot Motors <leads@foxtrotmotorsca.com>"
+# (domain must be verified in Resend). Falls back to the shared sender.
+FOXTROT_FROM_EMAIL = os.environ.get("FOXTROT_FROM_EMAIL", "") or RESEND_FROM_EMAIL
 
 # Browsers may only post from these sites (CORS). Add more with the
 # FOXTROT_EXTRA_ORIGINS env var, comma separated.
@@ -445,7 +448,7 @@ def foxtrot_lead():
         body_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</pre>"
 
     payload = {
-        "from": RESEND_FROM_EMAIL,
+        "from": FOXTROT_FROM_EMAIL,
         "to": [FOXTROT_NOTIFY_TO_EMAIL],
         "subject": f"New Foxtrot Motors Lead: {lead['name']}",
         "text": body_text,
