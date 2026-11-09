@@ -334,6 +334,135 @@ def elevenlabs_webhook():
     return jsonify({"status": "ignored", "type": event_type}), 200
 
 
+# ---------------------------------------------------------------------------
+# Foxtrot Motors website lead form
+# ---------------------------------------------------------------------------
+# The Foxtrot Motors website (static, on Cloudflare Pages) posts its request
+# form here as JSON. Leads are emailed through the same Resend setup as the
+# ElevenLabs leads above. No database; nothing is stored.
+
+FOXTROT_NOTIFY_TO_EMAIL = os.environ.get("FOXTROT_NOTIFY_TO_EMAIL", "") or NOTIFY_TO_EMAIL
+
+# Browsers may only post from these sites (CORS). Add more with the
+# FOXTROT_EXTRA_ORIGINS env var, comma separated.
+FOXTROT_ALLOWED_ORIGINS = {
+    "https://foxtrotmotorsca.com",
+    "https://www.foxtrotmotorsca.com",
+    "https://foxtrotmotors-site.pages.dev",
+} | {o.strip() for o in os.environ.get("FOXTROT_EXTRA_ORIGINS", "").split(",") if o.strip()}
+
+LEAD_FIELDS = [
+    ("name", "Name", 120),
+    ("email", "Email", 200),
+    ("phone", "Phone", 40),
+    ("vehicle", "Vehicle of interest", 200),
+    ("message", "Message", 4000),
+    ("estimate", "Your estimate", 4000),
+    ("form", "Form", 60),
+    ("page", "Page", 300),
+]
+
+# Simple in-memory rate limit: max submissions per IP per window.
+_LEAD_RATE_MAX = 10
+_LEAD_RATE_WINDOW = 600  # seconds
+_lead_hits = {}
+_lead_hits_lock = threading.Lock()
+
+
+def _origin_allowed(origin):
+    if origin in FOXTROT_ALLOWED_ORIGINS:
+        return True
+    # Cloudflare Pages branch/commit previews: https://<hash>.foxtrotmotors-site.pages.dev
+    return origin.startswith("https://") and origin.endswith(".foxtrotmotors-site.pages.dev")
+
+
+def _cors(response):
+    origin = request.headers.get("Origin", "")
+    if _origin_allowed(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Max-Age"] = "86400"
+    return response
+
+
+def _rate_limited(ip):
+    import time
+    now = time.time()
+    with _lead_hits_lock:
+        hits = [t for t in _lead_hits.get(ip, []) if now - t < _LEAD_RATE_WINDOW]
+        limited = len(hits) >= _LEAD_RATE_MAX
+        if not limited:
+            hits.append(now)
+        _lead_hits[ip] = hits
+    return limited
+
+
+@app.route("/lead/foxtrot", methods=["POST", "OPTIONS"])
+def foxtrot_lead():
+    if request.method == "OPTIONS":
+        return _cors(app.make_response(("", 204)))
+
+    if request.headers.get("Origin") and not _origin_allowed(request.headers.get("Origin", "")):
+        return jsonify({"error": "origin not allowed"}), 403
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        data = request.form.to_dict()
+
+    ip = (request.headers.get("X-Forwarded-For", request.remote_addr or "") or "").split(",")[0].strip()
+    if _rate_limited(ip):
+        return _cors(jsonify({"error": "too many requests"})), 429
+
+    lead = {key: str(data.get(key, "") or "").strip()[:limit] for key, _, limit in LEAD_FIELDS}
+    consent = str(data.get("consent", "")).strip().lower() in ("yes", "true", "on", "1")
+
+    if not lead["name"] or not (lead["email"] or lead["phone"]):
+        return _cors(jsonify({"error": "name and email or phone are required"})), 400
+    if not consent:
+        return _cors(jsonify({"error": "consent is required"})), 400
+    if not RESEND_API_KEY or not FOXTROT_NOTIFY_TO_EMAIL:
+        print("Foxtrot lead received but email is not configured (RESEND_API_KEY / NOTIFY_TO_EMAIL).")
+        return _cors(jsonify({"error": "lead email not configured"})), 500
+
+    lines = ["New Foxtrot Motors website request", ""]
+    for key, label, _ in LEAD_FIELDS:
+        if key in ("form", "page"):
+            continue
+        value = lead[key] or "Not provided"
+        if "\n" in value:
+            lines += [f"{label}:", value, ""]
+        else:
+            lines.append(f"{label}: {value}")
+    lines += ["", "Consent: Agreed to be contacted by phone, text, or email about this request.",
+              f"Form: {lead['form'] or 'website'}"]
+    if lead["page"]:
+        lines.append(f"Page: {lead['page']}")
+
+    body_text = "\n".join(lines)
+    body_html = "<pre style='font-family: monospace; white-space: pre-wrap;'>" + \
+        body_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;") + "</pre>"
+
+    payload = {
+        "from": RESEND_FROM_EMAIL,
+        "to": [FOXTROT_NOTIFY_TO_EMAIL],
+        "subject": f"New Foxtrot Motors Lead: {lead['name']}",
+        "text": body_text,
+        "html": body_html,
+    }
+    if lead["email"] and "@" in lead["email"]:
+        payload["reply_to"] = lead["email"]
+
+    try:
+        send_email(payload)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Failed to send Foxtrot website lead email: {exc}")
+        return _cors(jsonify({"error": "could not send"})), 502
+
+    return _cors(jsonify({"status": "sent"})), 200
+
+
 @app.route("/", methods=["GET"])
 def health_check():
     return "CARSTER / Foxtrot Motors webhook receiver is running.", 200
