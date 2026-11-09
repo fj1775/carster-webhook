@@ -345,6 +345,8 @@ FOXTROT_NOTIFY_TO_EMAIL = os.environ.get("FOXTROT_NOTIFY_TO_EMAIL", "") or NOTIF
 # Sender for Foxtrot website leads, e.g. "Foxtrot Motors <leads@foxtrotmotorsca.com>"
 # (domain must be verified in Resend). Falls back to the shared sender.
 FOXTROT_FROM_EMAIL = os.environ.get("FOXTROT_FROM_EMAIL", "") or RESEND_FROM_EMAIL
+# Name of the lead provider shown on website leads (like "TrueCar" or "Edmunds").
+LEAD_SOURCE_NAME = os.environ.get("LEAD_SOURCE_NAME", "Trinecord")
 
 # Browsers may only post from these sites (CORS). Add more with the
 # FOXTROT_EXTRA_ORIGINS env var, comma separated.
@@ -429,7 +431,9 @@ def foxtrot_lead():
         print("Foxtrot lead received but email is not configured (RESEND_API_KEY / NOTIFY_TO_EMAIL).")
         return _cors(jsonify({"error": "lead email not configured"})), 500
 
-    lines = ["New Foxtrot Motors website request", ""]
+    lines = [f"New Foxtrot Motors lead from {LEAD_SOURCE_NAME}", "",
+             f"Lead source: {LEAD_SOURCE_NAME}",
+             "Channel: Website request form", ""]
     for key, label, _ in LEAD_FIELDS:
         if key in ("form", "page"):
             continue
@@ -450,7 +454,7 @@ def foxtrot_lead():
     payload = {
         "from": FOXTROT_FROM_EMAIL,
         "to": [FOXTROT_NOTIFY_TO_EMAIL],
-        "subject": f"New Foxtrot Motors Lead: {lead['name']}",
+        "subject": f"{LEAD_SOURCE_NAME} Lead | Foxtrot Motors: {lead['name']}",
         "text": body_text,
         "html": body_html,
     }
