@@ -341,10 +341,10 @@ def elevenlabs_webhook():
 # form here as JSON. Leads are emailed through the same Resend setup as the
 # ElevenLabs leads above. No database; nothing is stored.
 
-FOXTROT_NOTIFY_TO_EMAIL = os.environ.get("FOXTROT_NOTIFY_TO_EMAIL", "") or NOTIFY_TO_EMAIL
+FOXTROT_NOTIFY_TO_EMAIL = os.environ.get("FOXTROT_NOTIFY_TO_EMAIL", "") or "ops@foxtrotmotorsca.com"
 # Sender for Foxtrot website leads, e.g. "Foxtrot Motors <leads@foxtrotmotorsca.com>"
-# (domain must be verified in Resend). Falls back to the shared sender.
-FOXTROT_FROM_EMAIL = os.environ.get("FOXTROT_FROM_EMAIL", "") or RESEND_FROM_EMAIL
+# (domain must be verified in Resend; foxtrotmotorsca.com is). Env var overrides.
+FOXTROT_FROM_EMAIL = os.environ.get("FOXTROT_FROM_EMAIL", "") or "Trinecord Leads <leads@foxtrotmotorsca.com>"
 # Name of the lead provider shown on website leads (like "TrueCar" or "Edmunds").
 LEAD_SOURCE_NAME = os.environ.get("LEAD_SOURCE_NAME", "Trinecord")
 
