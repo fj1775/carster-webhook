@@ -26,6 +26,7 @@ import hmac
 import hashlib
 import base64
 import threading
+import re
 
 import requests
 from flask import Flask, request, jsonify
@@ -53,6 +54,40 @@ AGENT_BRANDS = {
 # Agents that only chat (no call recording to wait for or mention).
 CHAT_ONLY_AGENTS = {FOXTROT_AGENT_ID}
 DEFAULT_BRAND = "CARSTER"
+# Foxtrot Motors agent emails (phone and chat) send from the verified Foxtrot
+# domain, same as the website form. CARSTER keeps RESEND_FROM_EMAIL.
+FOXTROT_AGENT_IDS = {FOXTROT_AGENT_ID, FOXTROT_PHONE_AGENT_ID}
+FOXTROT_AGENT_FROM_EMAIL = (os.environ.get("FOXTROT_AGENT_FROM_EMAIL", "")
+                            or os.environ.get("FOXTROT_FROM_EMAIL", "")
+                            or "Trinecord Leads <leads@foxtrotmotorsca.com>")
+
+
+def from_address_for(lead_info):
+    if (lead_info or {}).get("agent_id", "") in FOXTROT_AGENT_IDS:
+        return FOXTROT_AGENT_FROM_EMAIL
+    return RESEND_FROM_EMAIL
+
+
+def phone_warning(lead_info):
+    """Deterministic backstop for Foxtrot phone-agent leads: flag a captured
+    callback number that is not a 10-digit US number. A leading country
+    code 1 on an 11-digit number is accepted. Returns a warning line or None."""
+    if (lead_info or {}).get("agent_id", "") != FOXTROT_PHONE_AGENT_ID:
+        return None
+    lead = lead_info.get("lead", {}) or {}
+    keys = [k for k in lead if "phone" in str(k).lower()] or \
+           [k for k in lead if "callback" in str(k).lower().replace(" ", "").replace("_", "")]
+    if not keys:
+        return "WARNING: no callback phone number was captured. Verify before calling."
+    raw = str(lead[keys[0]])
+    if raw == "Not provided":
+        return "WARNING: no callback phone number was captured. Verify before calling."
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    if len(digits) != 10:
+        return f"WARNING: captured phone has {len(digits)} digits ({raw}). Verify before calling."
+    return None
 
 
 def brand_for(lead_info):
@@ -171,6 +206,9 @@ def build_email_payload(conversation_id, lead_info, audio_bytes):
     is_chat_brand = is_chat_agent(lead_info)
 
     lines = [f"New {brand} {'conversation' if is_chat_brand else 'call'} — Conversation ID: {conversation_id}"]
+    warning = phone_warning(lead_info)
+    if warning:
+        lines = [warning, ""] + lines
 
     if lead_info:
         lines += ["", "== Lead Details =="]
@@ -208,7 +246,7 @@ def build_email_payload(conversation_id, lead_info, audio_bytes):
     subject = f"New {brand} Lead — {name_part}" if lead_info else f"{brand} Call — {conversation_id}"
 
     payload = {
-        "from": RESEND_FROM_EMAIL,
+        "from": from_address_for(lead_info),
         "to": [NOTIFY_TO_EMAIL],
         "subject": subject,
         "text": body_text,
